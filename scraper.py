@@ -58,8 +58,8 @@ async def scrape_with_playwright(start_url: str, existing_visited_urls: set):
                         print(f"   - Selector '{selector}' not found.")
                         continue
                 
-                if next_button is None:
-                    raise Exception("Could not find a valid 'Next' button with any of the defined selectors.")
+                # if next_button is None:
+                #     raise Exception("Could not find a valid 'Next' button with any of the defined selectors.")
 
                 delay = random.uniform(1.5, 4.0)
                 await asyncio.sleep(delay)
@@ -96,7 +96,7 @@ async def main():
 
     next_url_to_scrape = url_input
     master_visited_urls = set()
-    max_restarts = 10
+    max_restarts = 3
     restart_count = 0
 
     while next_url_to_scrape is not None and restart_count < max_restarts:
@@ -110,9 +110,9 @@ async def main():
             next_url_to_scrape, 
             master_visited_urls
         )
-        if next_url_to_scrape in master_visited_urls:
-            print("\nWorker failed on a previously successful URL. Assuming this is the end of the line.")
-            next_url_to_scrape = None
+        # if next_url_to_scrape in master_visited_urls:
+        #     print("\nWorker failed on a previously successful URL. Assuming this is the end of the line.")
+        #     next_url_to_scrape = None
 
         restart_count += 1
     
