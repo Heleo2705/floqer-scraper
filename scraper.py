@@ -96,7 +96,7 @@ async def main():
 
     next_url_to_scrape = url_input
     master_visited_urls = set()
-    max_restarts = 3
+    max_restarts = 30
     restart_count = 0
 
     while next_url_to_scrape is not None and restart_count < max_restarts:
