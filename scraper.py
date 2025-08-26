@@ -3,10 +3,20 @@ import re
 import random
 from playwright.async_api import async_playwright
 
+def get_page_number_from_url(url: str) -> int:
+    """
+    Parses a URL to find the page number from a query parameter like '?p=XX'.
+    Returns 0 if it's the base directory URL without a page number.
+    """
+    match = re.search(r'p=(\d+)', url)
+    if match:
+        return int(match.group(1))
+    # The base URL (e.g., /directory/) is considered page 0 for sequencing.
+    return 0
+
 async def scrape_with_playwright(start_url: str, existing_visited_urls: set):
     """
-    Scrapes a site using a single browser session with robust, contextual selectors.
-    This function is designed to be restartable.
+    Scrapes a site in a single browser session with robust selectors and page-skip detection.
     """
     print(f"\n--- Starting new scraping session at: {start_url} ---")
     ACTION_TIMEOUT = 30000  # 30 seconds
@@ -22,7 +32,8 @@ async def scrape_with_playwright(start_url: str, existing_visited_urls: set):
         page = await context.new_page()
         await page.goto(start_url, timeout=60000, wait_until='networkidle')
             
-        page_number = 0
+        previous_page_number = get_page_number_from_url(start_url)
+        previous_url = start_url
 
         while True:
             current_url = page.url
@@ -32,44 +43,49 @@ async def scrape_with_playwright(start_url: str, existing_visited_urls: set):
                 print(f"Scraping URL: {current_url}")
                 visited_urls.add(current_url)
                 last_successful_url = current_url
+            
+            # --- PAGE SKIP DETECTION ---
+            current_page_number = get_page_number_from_url(current_url)
+            if current_page_number > previous_page_number + 1:
+                print("\n[!] PAGE SKIP DETECTED!")
+                print(f"    Jumped from page {previous_page_number} to {current_page_number}.")
+                print(f"    Forcing a restart from the last good URL: {previous_url}")
+                await browser.close()
+                return previous_url, visited_urls # Trigger restart
 
             try:
-                # --- UPGRADED SELECTOR STRATEGY ---
-                # A prioritized list of selectors, from most specific to most general.
                 next_button_selectors = [
-                    'li.pagination-item--next a',                             # 1. The exact structure for BigCommerce
-                    'nav[aria-label*="pagination" i] a:has-text("Next")',     # 2. A "Next" link inside a pagination navigation area
-                    # --- THE NEW ADDITION ---
-                    'a[href][onclick]:has-text("Next")',                      # 3. A link with both href and onclick attributes (your idea)
-                    'a[rel="next"]',                                          # 4. A link with the semantic 'rel="next"' attribute
-                    '.pagination a:has-text("Next")'                          # 5. A "Next" link inside a common ".pagination" class
+                    'li.pagination-item--next a',
+                    'nav[aria-label*="pagination" i] a:has-text("Next")',
+                    'a[href][onclick]:has-text("Next")',
+                    'a[rel="next"]',
+                    '.pagination a:has-text("Next")'
                 ]
-
                 next_button = None
-                print("   Searching for a valid 'Next' button...")
                 for selector in next_button_selectors:
                     try:
                         candidate_button = page.locator(selector).first
                         await candidate_button.wait_for(state='visible', timeout=1000)
-                        print(f"   ✅ Found a potential button with selector: '{selector}'")
                         next_button = candidate_button
                         break 
                     except Exception:
-                        print(f"   - Selector '{selector}' not found.")
                         continue
                 
-                # if next_button is None:
-                #     raise Exception("Could not find a valid 'Next' button with any of the defined selectors.")
+                if next_button is None:
+                    raise Exception("Could not find a valid 'Next' button.")
 
                 delay = random.uniform(1.5, 4.0)
                 await asyncio.sleep(delay)
                 await next_button.click(timeout=ACTION_TIMEOUT)
                 
                 await page.wait_for_load_state('domcontentloaded', timeout=ACTION_TIMEOUT)
-                page_number += 1
+                
+                # Update state for the next loop iteration
+                previous_page_number = current_page_number
+                previous_url = current_url
 
             except Exception as e:
-                print(f"\n[!] SCRAPER FAILED or finished on page ~{page_number}.")
+                print(f"\n[!] SCRAPER FAILED or finished.")
                 print(f"   The last successful URL was: {last_successful_url}")
                 print(f"   Reason: {repr(e)}")
                 await browser.close()
@@ -110,10 +126,6 @@ async def main():
             next_url_to_scrape, 
             master_visited_urls
         )
-        # if next_url_to_scrape in master_visited_urls:
-        #     print("\nWorker failed on a previously successful URL. Assuming this is the end of the line.")
-        #     next_url_to_scrape = None
-
         restart_count += 1
     
     print("\n--- ORCHESTRATOR FINISHED ---")
