@@ -1,7 +1,7 @@
 import asyncio
 import re
 import random
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError
 
 def get_page_number(url: str) -> int:
     """
@@ -29,13 +29,63 @@ def get_page_number(url: str) -> int:
     if match:
         return int(match.group(1))
     
-    # --- THE CRUCIAL CHANGE ---
     # If no pattern matches, it's the first un-numbered page. Assume it's page 1.
     return 1
 
+async def handle_dynamic_content_loading(page):
+    """
+    Handles 'See More' buttons and basic 'infinite scroll' by scrolling and clicking.
+    """
+    see_more_selectors = [# In handle_dynamic_content_loading function
+
+    'button:has-text("See More")',
+    'button:has-text("Show More")', # Added for sites like B&H
+    'button:has-text("Load More")',
+    'a:has-text("Show More")',
+    '.load-more',
+    '[data-testid="load-more-button"]'
+
+    ]
+    
+    while True:
+        clicked_or_scrolled = False
+        # --- STRATEGY 1: CLICK 'SEE MORE' BUTTONS ---
+        for selector in see_more_selectors:
+            try:
+                see_more_button = page.locator(selector).first
+                if await see_more_button.is_visible():
+                    print(f"-> Found and clicking a '{await see_more_button.text_content()}' button.")
+                    await see_more_button.click()
+                    await page.goto(start_url, timeout=60000, wait_until='load')
+                    clicked_or_scrolled = True
+                    break 
+            except Exception:
+                continue
+        
+        if clicked_or_scrolled:
+            await asyncio.sleep(random.uniform(1.0, 2.5)) # Wait for content to render
+            continue # Restart the loop to check for new buttons
+
+        # --- STRATEGY 2: HANDLE INFINITE SCROLL ---
+        initial_height = await page.evaluate('document.body.scrollHeight')
+        await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+        await asyncio.sleep(2) # Wait for scroll to trigger content load
+        await page.wait_for_load_state('networkidle', timeout=10000)
+        new_height = await page.evaluate('document.body.scrollHeight')
+
+        if new_height > initial_height:
+            print(f"-> Scrolled down to load more content (height changed from {initial_height} to {new_height}).")
+            clicked_or_scrolled = True
+        
+        if not clicked_or_scrolled:
+            print("-> No more dynamic content buttons or scroll-to-load content found.")
+            break
+
+
 async def scrape_with_playwright(start_url: str, existing_visited_urls: set):
     """
-    Scrapes a site with robust selectors and adaptable page-skip detection.
+    Scrapes a site with robust selectors, adaptable page-skip detection,
+    and now handles dynamic content loading ('See More' / Infinite Scroll).
     """
     print(f"\n--- Starting new scraping session at: {start_url} ---")
     ACTION_TIMEOUT = 30000  # 30 seconds
@@ -60,6 +110,10 @@ async def scrape_with_playwright(start_url: str, existing_visited_urls: set):
                 print(f"-> Already scraped {current_url}. Re-evaluating page...")
             else:
                 print(f"Scraping URL: {current_url}")
+                # --- NEW: Handle all dynamic content on the page first ---
+                await handle_dynamic_content_loading(page)
+                
+                # After loading all content, add the URL to the visited set
                 visited_urls.add(current_url)
                 last_successful_url = current_url
             
@@ -73,20 +127,56 @@ async def scrape_with_playwright(start_url: str, existing_visited_urls: set):
                 return previous_url, visited_urls # Trigger restart
 
             try:
-                next_button_selectors = [
-                    'li.pagination-item--next a',
-                    'nav[aria-label*="pagination" i] a:has-text("Next")',
-                    'a[href][onclick]:has-text("Next")',
-                    'a[rel="next"]',
-                    '.pagination a:has-text("Next")'
-                ]
+                # --- PAGINATION LOGIC ---
+                next_button_selectors = [# Inside the handle_dynamic_content_loading function
+
+    # --- TIER 1: HIGH-CONFIDENCE ATTRIBUTE SELECTORS ---
+    # Used for testing, very stable (e.g., data-testid="load-more-button")
+    '[data-testid*="load-more" i]',
+    '[data-testid*="show-more" i]',
+    # Used by developers for custom JS hooks
+    '[data-action*="load-more" i]',
+    '[data-action*="show-more" i]',
+    # Accessibility attributes are great, stable hooks
+    'button[aria-label*="load more" i]',
+    'a[aria-label*="load more" i]',
+    'button[aria-label*="show more" i]',
+    'a[aria-label*="show more" i]',
+
+    # --- TIER 2: COMMON TEXT PATTERNS (EXPANDED) ---
+    # The most common patterns for <button> and <a> tags
+    'button:has-text("Show More")',
+    'button:has-text("Load More")',
+    'button:has-text("See More")',
+    'button:has-text("View More")',
+    'a:has-text("Show More")',
+    'a:has-text("Load More")',
+    'a:has-text("See More")',
+    'a:has-text("View More")',
+    
+    # --- TIER 3: COMMON CLASS NAME PATTERNS ---
+    # Looks for keywords in the class attribute, very effective
+    '[class*="load-more" i]',
+    '[class*="show-more" i]',
+    '[class*="see-more" i]',
+    '[class*="view-more" i]',
+    '[class*="loadmore" i]', # Also check for variations without spaces
+    '[class*="showmore" i]',
+
+    # --- TIER 4: GENERIC FALLBACKS ---
+    # A link with "More" at the very end of a list can sometimes be the one
+    'a.more-link',
+    '.more-button'
+]
                 next_button = None
                 for selector in next_button_selectors:
                     try:
                         candidate_button = page.locator(selector).first
                         await candidate_button.wait_for(state='visible', timeout=1000)
-                        next_button = candidate_button
-                        break 
+                        if await candidate_button.is_enabled():
+                            next_button = candidate_button
+                            print(f"Found 'Next' button with selector: '{selector}'")
+                            break 
                     except Exception:
                         continue
                 
@@ -97,7 +187,7 @@ async def scrape_with_playwright(start_url: str, existing_visited_urls: set):
                 await asyncio.sleep(delay)
                 await next_button.click(timeout=ACTION_TIMEOUT)
                 
-                await page.wait_for_load_state('domcontentloaded', timeout=ACTION_TIMEOUT)
+                await page.wait_for_url(lambda url: url != current_url, timeout=ACTION_TIMEOUT)
                 
                 previous_page_number = current_page_number
                 previous_url = current_url
