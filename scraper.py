@@ -16,12 +16,18 @@ def get_page_number(url: str) -> int:
 
 
 async def handle_overlays(page):
+    """
+    Systematically finds and closes cookie banners or other pop-ups,
+    including those inside iframes. Now updated for more banner types.
+    """
     print("-> Searching for potential overlays...")
+    # Add new selectors for ACCEPT/REFUSE buttons to the list
     reject_selectors = [
-        '[aria-label="Reject all cookies"]',
+        'button:has-text("REFUSE")',
         'button:has-text("Reject all")',
         'button:has-text("Reject All")',
         'button:has-text("Decline")',
+        'button:has-text("ACCEPT")',  # As a last resort, accept
         "#ccc-reject-settings",
     ]
     clicked = False
@@ -29,15 +35,19 @@ async def handle_overlays(page):
         try:
             button = page.locator(selector).first
             await button.wait_for(state="visible", timeout=2500)
-            print(f"   -> Found button '{selector}'. Clicking...")
+            print(f"   -> Found button with selector '{selector}'. Clicking...")
             await button.click()
             clicked = True
             break
         except Exception:
             continue
+
     if clicked:
+        print("   -> Overlay click sent. Allowing a moment for it to disappear.")
         await page.wait_for_timeout(1500)
         return
+
+    # Fallback to check inside iframes
     try:
         for frame in page.frames:
             for selector in reject_selectors:
@@ -53,6 +63,7 @@ async def handle_overlays(page):
                 break
     except Exception:
         pass
+
     if not clicked:
         print("-> No actionable overlays found.")
 
@@ -65,7 +76,7 @@ async def scrape_with_playwright(
     visited_urls, last_successful_url = existing_visited_urls, start_url
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(headless=False)
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         )
@@ -76,7 +87,10 @@ async def scrape_with_playwright(
             await page.goto(start_url, timeout=90000, wait_until="domcontentloaded")
             await handle_overlays(page)
             print("-> Waiting for main content to be ready...")
-            await page.wait_for_selector("body", timeout=60000)
+            # Wait for a generic body selector OR a specific content selector if known
+            await page.wait_for_selector(
+                'body:has-text("exhibitors"), #items-list', timeout=60000
+            )
             print("-> Page is ready.")
         except TimeoutError as e:
             print(f"[!] FATAL ERROR: Initial page load failed: {e}")
@@ -97,7 +111,8 @@ async def scrape_with_playwright(
             try:
                 print("-> Searching for 'Next' button...")
                 next_button_selectors = [
-                    'button:has(i[class*="fa-arrow-right"])',
+                    "a.next",  # Specific for techforretail.com
+                    'button:has(i[class*="fa-arrow-right"])',  # Specific for websummit.com
                     'a[rel="next"]',
                     'button[rel="next"]',
                     'a[aria-label*="next" i]',
@@ -125,7 +140,7 @@ async def scrape_with_playwright(
                 # --- HYBRID WAIT LOGIC ---
                 print("-> Clicking 'Next'. Preparing to wait for page update...")
                 try:
-                    # ATTEMPT 1: Wait for a background network response (for SPAs like Web Summit)
+                    # ATTEMPT 1: Wait for a background network response (for SPAs)
                     print("   -> Waiting for SPA-style network response...")
                     async with page.expect_response(
                         lambda r: "page=" in r.url and r.status == 200, timeout=10000
@@ -160,7 +175,8 @@ async def main():
     print("--- Resilient & Adaptable Scraping Orchestrator ---")
     url_input = input("Please enter the full starting URL to scrape: ").strip()
     if not url_input:
-        url_input = "https://websummit.com/featured-attendees"
+        # url_input = "https://websummit.com/featured-attendees"
+        url_input = "https://techforretail.com/en/partners?searchtext="
     if not re.match(r"^https?:\/\/", url_input):
         url_input = f"https://{url_input}"
     print(f"Starting with URL: {url_input}")
